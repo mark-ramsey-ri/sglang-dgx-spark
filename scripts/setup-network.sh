@@ -82,8 +82,11 @@ configure_network() {
     print_msg "Bringing interface $INTERFACE up..."
     ip link set "$INTERFACE" up
     
-    # Remove existing IP addresses on this interface
-    ip addr flush dev "$INTERFACE" 2>/dev/null || true
+    # Remove existing IP addresses on this interface (if any exist)
+    if ip addr show dev "$INTERFACE" 2>/dev/null | grep -q "inet "; then
+        print_msg "Removing existing IP addresses..."
+        ip addr flush dev "$INTERFACE" 2>/dev/null
+    fi
     
     # Add new IP address
     print_msg "Assigning IP address $ip_addr/$SUBNET_MASK..."

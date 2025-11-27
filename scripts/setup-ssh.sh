@@ -106,16 +106,14 @@ Host spark-node1
     HostName $NODE1_IP
     User ${USER:-$(whoami)}
     IdentityFile $SSH_KEY_PATH
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
+    StrictHostKeyChecking accept-new
     LogLevel ERROR
 
 Host spark-node2
     HostName $NODE2_IP
     User ${USER:-$(whoami)}
     IdentityFile $SSH_KEY_PATH
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
+    StrictHostKeyChecking accept-new
     LogLevel ERROR
 EOF
     

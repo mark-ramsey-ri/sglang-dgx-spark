@@ -18,6 +18,10 @@ NODE2_IP="${NODE2_IP:-192.168.100.11}"
 INTERFACE="${INTERFACE:-enp1s0f1np1}"
 SGLANG_PORT="${SGLANG_PORT:-30000}"
 
+# Determine script directory (resolves symlinks and relative paths)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Counters
 CHECKS_PASSED=0
 CHECKS_FAILED=0
@@ -99,10 +103,19 @@ check_docker() {
     fi
     
     print_check "Docker GPU access"
-    if docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi &>/dev/null; then
+    # First check if NVIDIA runtime is configured, then optionally test with container
+    if docker info 2>/dev/null | grep -q "Runtimes:.*nvidia"; then
+        # NVIDIA runtime is configured, verify GPU access with container
+        if docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi &>/dev/null; then
+            print_pass
+        else
+            print_fail "Docker NVIDIA runtime configured but cannot access GPU"
+        fi
+    elif command -v nvidia-container-cli &>/dev/null && nvidia-container-cli info &>/dev/null; then
         print_pass
+        print_info "NVIDIA Container CLI available (container test skipped)"
     else
-        print_fail "Docker cannot access GPU"
+        print_fail "Docker cannot access GPU - NVIDIA runtime not configured"
     fi
     
     print_check "Docker Compose"
@@ -225,7 +238,7 @@ check_sglang() {
     
     print_check "Docker Compose configuration"
     local compose_file
-    compose_file="$(dirname "$0")/../docker/compose.yml"
+    compose_file="$REPO_ROOT/docker/compose.yml"
     if [ -f "$compose_file" ]; then
         print_pass
     else
@@ -234,10 +247,10 @@ check_sglang() {
     
     print_check "Environment file"
     local env_file
-    env_file="$(dirname "$0")/../docker/.env"
+    env_file="$REPO_ROOT/docker/.env"
     if [ -f "$env_file" ]; then
         print_pass
-        if grep -q "HF_TOKEN" "$env_file" && ! grep -q "your_huggingface_token_here" "$env_file"; then
+        if grep -q "HF_TOKEN" "$env_file" && ! grep -q "your_huggingface_token_here" "$env_file" && ! grep -q "REPLACE_WITH_YOUR" "$env_file"; then
             print_info "HF_TOKEN is configured"
         else
             print_warn "HF_TOKEN may not be configured properly"

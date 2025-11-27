@@ -1,5 +1,3 @@
-version: '2.3'
-
 # SGLang Multi-Node Configuration for NVIDIA DGX Spark
 # This configuration sets up SGLang inference server across two DGX Spark nodes
 # with tensor parallelism for distributed LLM inference.

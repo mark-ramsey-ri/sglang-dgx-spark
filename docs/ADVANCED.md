@@ -235,7 +235,7 @@ Key metrics to monitor:
 
 ### Grafana Dashboard
 
-Import the SGLang dashboard (ID: XXXXX) or create custom panels:
+Create a custom Grafana dashboard with panels for SGLang metrics, or use the example panel configuration below:
 
 ```json
 {

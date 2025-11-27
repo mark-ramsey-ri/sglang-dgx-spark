@@ -24,7 +24,7 @@ metadata:
   namespace: sglang
 type: Opaque
 stringData:
-  HF_TOKEN: "your_huggingface_token_here"  # Replace with actual token
+  HF_TOKEN: "REPLACE_WITH_YOUR_HUGGINGFACE_TOKEN"  # Replace with actual token
 ---
 apiVersion: v1
 kind: Service
