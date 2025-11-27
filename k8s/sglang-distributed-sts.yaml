@@ -1,0 +1,211 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sglang
+  labels:
+    app: sglang
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sglang-config
+  namespace: sglang
+data:
+  MODEL_PATH: "meta-llama/Llama-3.1-8B-Instruct"
+  SGLANG_PORT: "30000"
+  SGLANG_TP: "2"
+  NCCL_SOCKET_IFNAME: "enp1s0f1np1"
+  NCCL_DEBUG: "INFO"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sglang-secrets
+  namespace: sglang
+type: Opaque
+stringData:
+  HF_TOKEN: "your_huggingface_token_here"  # Replace with actual token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-headless
+  namespace: sglang
+  labels:
+    app: sglang
+spec:
+  clusterIP: None
+  selector:
+    app: sglang
+  ports:
+    - name: http
+      port: 30000
+      targetPort: 30000
+    - name: nccl
+      port: 29500
+      targetPort: 29500
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang
+  namespace: sglang
+  labels:
+    app: sglang
+spec:
+  type: LoadBalancer
+  selector:
+    app: sglang
+    statefulset.kubernetes.io/pod-name: sglang-0
+  ports:
+    - name: http
+      port: 30000
+      targetPort: 30000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sglang
+  namespace: sglang
+  labels:
+    app: sglang
+spec:
+  serviceName: sglang-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sglang
+  template:
+    metadata:
+      labels:
+        app: sglang
+    spec:
+      # Ensure pods are scheduled on different nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - sglang
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: sglang
+          image: lmsysorg/sglang:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 30000
+            - name: nccl
+              containerPort: 29500
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sglang-secrets
+                  key: HF_TOKEN
+            - name: MODEL_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: sglang-config
+                  key: MODEL_PATH
+            - name: SGLANG_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: sglang-config
+                  key: SGLANG_PORT
+            - name: SGLANG_TP
+              valueFrom:
+                configMapKeyRef:
+                  name: sglang-config
+                  key: SGLANG_TP
+            - name: NCCL_SOCKET_IFNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: sglang-config
+                  key: NCCL_SOCKET_IFNAME
+            - name: NCCL_DEBUG
+              valueFrom:
+                configMapKeyRef:
+                  name: sglang-config
+                  key: NCCL_DEBUG
+            - name: MASTER_ADDR
+              value: "sglang-0.sglang-headless.sglang.svc.cluster.local"
+            - name: MASTER_PORT
+              value: "29500"
+            - name: WORLD_SIZE
+              value: "2"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # Determine node rank from pod name
+              NODE_RANK=$(echo $POD_NAME | grep -oP '\d+$')
+              export NODE_RANK
+              
+              python3 -m sglang.launch_server \
+                --model-path $MODEL_PATH \
+                --host 0.0.0.0 \
+                --port $SGLANG_PORT \
+                --tp $SGLANG_TP \
+                --trust-remote-code \
+                --attention-backend flashinfer \
+                --mem-fraction-static 0.75
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+            requests:
+              nvidia.com/gpu: 1
+              memory: "64Gi"
+              cpu: "8"
+          volumeMounts:
+            - name: huggingface-cache
+              mountPath: /root/.cache/huggingface
+            - name: sglang-cache
+              mountPath: /root/.cache/sglang
+            - name: dshm
+              mountPath: /dev/shm
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 30000
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 30000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+  volumeClaimTemplates:
+    - metadata:
+        name: huggingface-cache
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Gi
+    - metadata:
+        name: sglang-cache
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi

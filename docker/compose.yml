@@ -1,0 +1,124 @@
+version: '2.3'
+
+# SGLang Multi-Node Configuration for NVIDIA DGX Spark
+# This configuration sets up SGLang inference server across two DGX Spark nodes
+# with tensor parallelism for distributed LLM inference.
+
+services:
+  sglang-node1:
+    image: lmsysorg/sglang:latest
+    runtime: nvidia
+    container_name: sglang-node1
+    hostname: sglang-node1
+    environment:
+      # Hugging Face token for model access
+      HF_TOKEN: "${HF_TOKEN}"
+      # Model configuration
+      MODEL_PATH: "${MODEL_PATH:-meta-llama/Llama-3.1-8B-Instruct}"
+      # SGLang configuration
+      SGLANG_HOST: "0.0.0.0"
+      SGLANG_PORT: "30000"
+      # Tensor parallelism - set to 2 for two-node setup
+      SGLANG_TP: "${SGLANG_TP:-2}"
+      # NCCL configuration for multi-node communication
+      NCCL_SOCKET_IFNAME: "enp1s0f1np1"
+      NCCL_DEBUG: "INFO"
+      NCCL_IB_DISABLE: "0"
+      # Node configuration
+      NODE_RANK: "0"
+      WORLD_SIZE: "2"
+      MASTER_ADDR: "192.168.100.10"
+      MASTER_PORT: "29500"
+    command: >
+      python3 -m sglang.launch_server
+      --model-path ${MODEL_PATH:-meta-llama/Llama-3.1-8B-Instruct}
+      --host 0.0.0.0
+      --port 30000
+      --tp ${SGLANG_TP:-2}
+      --trust-remote-code
+      --attention-backend flashinfer
+      --mem-fraction-static 0.75
+    ports:
+      - "30000:30000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - sglang-cache-node1:/root/.cache/sglang
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - sglang-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:30000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  sglang-node2:
+    image: lmsysorg/sglang:latest
+    runtime: nvidia
+    container_name: sglang-node2
+    hostname: sglang-node2
+    environment:
+      # Hugging Face token for model access
+      HF_TOKEN: "${HF_TOKEN}"
+      # Model configuration
+      MODEL_PATH: "${MODEL_PATH:-meta-llama/Llama-3.1-8B-Instruct}"
+      # SGLang configuration
+      SGLANG_HOST: "0.0.0.0"
+      SGLANG_PORT: "30000"
+      # Tensor parallelism - set to 2 for two-node setup
+      SGLANG_TP: "${SGLANG_TP:-2}"
+      # NCCL configuration for multi-node communication
+      NCCL_SOCKET_IFNAME: "enp1s0f1np1"
+      NCCL_DEBUG: "INFO"
+      NCCL_IB_DISABLE: "0"
+      # Node configuration
+      NODE_RANK: "1"
+      WORLD_SIZE: "2"
+      MASTER_ADDR: "192.168.100.10"
+      MASTER_PORT: "29500"
+    command: >
+      python3 -m sglang.launch_server
+      --model-path ${MODEL_PATH:-meta-llama/Llama-3.1-8B-Instruct}
+      --host 0.0.0.0
+      --port 30000
+      --tp ${SGLANG_TP:-2}
+      --trust-remote-code
+      --attention-backend flashinfer
+      --mem-fraction-static 0.75
+    ports:
+      - "30001:30000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - sglang-cache-node2:/root/.cache/sglang
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - sglang-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:30000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+networks:
+  sglang-net:
+    driver: bridge
+
+volumes:
+  sglang-cache-node1:
+  sglang-cache-node2:
