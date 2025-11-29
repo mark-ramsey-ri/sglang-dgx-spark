@@ -1,0 +1,23 @@
+# Local configuration (contains secrets like HF_TOKEN, IPs)
+config.local.env
+
+# Benchmark results (may contain system-specific data)
+benchmark_results/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
