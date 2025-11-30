@@ -29,7 +29,6 @@ MODELS=(
   "meta-llama/Llama-3.1-70B-Instruct"
   "microsoft/phi-4"
   "google/gemma-2-27b-it"
-  "deepseek-ai/DeepSeek-V2-Lite-Chat"
 )
 
 # Human-readable model descriptions
@@ -47,7 +46,6 @@ MODEL_NAMES=(
   "Llama-3.1-70B (70B params, ~65GB, high quality)"
   "Phi-4 (15B params, ~14-16GB, small but smart)"
   "Gemma2-27B (27B params, ~24-28GB, strong mid-size)"
-  "DeepSeek-V2-Lite (16B MoE, ~12-16GB, very fast, reasoning tuned)"
 )
 
 # Tensor Parallelism (number of GPUs needed)
@@ -66,7 +64,6 @@ MODEL_TP=(
   2    # Llama-3.1-70B
   2    # Phi-4
   2    # Gemma2-27B
-  2    # DeepSeek-V2-Lite
 )
 
 # Number of nodes required (all models use 2 nodes)
@@ -84,25 +81,23 @@ MODEL_NODES=(
   2    # Llama-3.1-70B
   2    # Phi-4
   2    # Gemma2-27B
-  2    # DeepSeek-V2-Lite
 )
 
-# Memory fraction (0.90 default, lower for larger models)
+# Memory fraction (0.90 default, lower for models that had initialization issues)
 MODEL_MEM=(
   0.90  # gpt-oss-120b
   0.90  # gpt-oss-20b
   0.90  # Qwen2.5-7B
   0.90  # Qwen2.5-14B
-  0.90  # Qwen2.5-32B
+  0.85  # Qwen2.5-32B - lowered due to initialization failures
   0.90  # Qwen2.5-72B
   0.90  # Mistral-7B
-  0.90  # Mistral-Nemo-12B
-  0.90  # Mixtral-8x7B
+  0.85  # Mistral-Nemo-12B - lowered due to initialization failures (128k context)
+  0.85  # Mixtral-8x7B - lowered due to initialization failures (MoE)
   0.90  # Llama-3.1-8B
   0.90  # Llama-3.1-70B
   0.90  # Phi-4
   0.90  # Gemma2-27B
-  0.90  # DeepSeek-V2-Lite
 )
 
 # Reasoning parser (gpt-oss for GPT-OSS models, empty for others)
@@ -120,7 +115,6 @@ MODEL_REASONING_PARSER=(
   ""         # Llama-3.1-70B
   ""         # Phi-4
   ""         # Gemma2-27B
-  "deepseek" # DeepSeek-V2-Lite
 )
 
 # Tool call parser
@@ -138,7 +132,6 @@ MODEL_TOOL_PARSER=(
   "llama3"   # Llama-3.1-70B
   ""         # Phi-4
   ""         # Gemma2-27B
-  ""         # DeepSeek-V2-Lite
 )
 
 # Trust remote code flag
@@ -156,7 +149,6 @@ MODEL_TRUST_REMOTE=(
   false  # Llama-3.1-70B
   true   # Phi-4 - requires trust_remote_code
   false  # Gemma2-27B
-  true   # DeepSeek-V2-Lite - requires trust_remote_code
 )
 
 # Requires HF token (gated models)
@@ -174,7 +166,6 @@ MODEL_NEEDS_TOKEN=(
   true   # Llama-3.1-70B - gated
   false  # Phi-4
   true   # Gemma2-27B - gated
-  false  # DeepSeek-V2-Lite
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -428,6 +419,8 @@ fi
   fi
 
   # Build EXTRA_ARGS
+  # Note: --enable-dp-attention is needed for multi-node TP to bypass FlashInfer AllReduce
+  # Fusion which uses CUDA IPC that doesn't work across nodes.
   EXTRA_ARGS_VALUE=""
   if [ "${NEW_NODES}" -gt 1 ]; then
     EXTRA_ARGS_VALUE="--enable-dp-attention"

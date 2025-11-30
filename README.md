@@ -346,7 +346,6 @@ All models run across both DGX Spark nodes (TP=2) for maximum performance.
 | 11 | `meta-llama/Llama-3.1-70B-Instruct` | ~65GB | High quality (needs HF token) |
 | 12 | `microsoft/phi-4` | ~14-16GB | Small but smart |
 | 13 | `google/gemma-2-27b-it` | ~24-28GB | Strong mid-size (needs HF token) |
-| 14 | `deepseek-ai/DeepSeek-V2-Lite-Chat` | ~12-16GB | MoE, reasoning tuned |
 
 ## API Endpoints
 

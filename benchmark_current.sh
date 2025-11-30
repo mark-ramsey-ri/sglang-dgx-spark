@@ -317,6 +317,8 @@ BENCH_START=$(date +%s.%N)
 if [ "${USE_DOCKER}" = "true" ]; then
   docker run --rm --network host \
     -v /tmp:/tmp \
+    -e "HF_TOKEN=${HF_TOKEN:-}" \
+    -e "HF_HOME=/root/.cache/huggingface" \
     "${SGLANG_IMAGE}" \
     python3 -m sglang.bench_serving "${BENCH_ARGS[@]}"
 else

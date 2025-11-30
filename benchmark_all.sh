@@ -28,7 +28,6 @@ MODELS=(
   "meta-llama/Llama-3.1-70B-Instruct"
   "microsoft/phi-4"
   "google/gemma-2-27b-it"
-  "deepseek-ai/DeepSeek-V2-Lite-Chat"
 )
 
 MODEL_SHORT_NAMES=(
@@ -45,15 +44,14 @@ MODEL_SHORT_NAMES=(
   "Llama-3.1-70B"
   "Phi-4"
   "Gemma2-27B"
-  "DeepSeek-V2-Lite"
 )
 
 MODEL_NODES=(
-  2 2 2 2 2 2 2 2 2 2 2 2 2 2
+  2 2 2 2 2 2 2 2 2 2 2 2 2
 )
 
 MODEL_NEEDS_TOKEN=(
-  false false false false false false false false false true true false true false
+  false false false false false false false false false true true false true
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -72,8 +70,8 @@ NUM_PROMPTS="${NUM_PROMPTS:-50}"
 INPUT_LEN="${INPUT_LEN:-256}"
 OUTPUT_LEN="${OUTPUT_LEN:-256}"
 
-# Timing
-STARTUP_TIMEOUT=600
+# Timing (increased to accommodate NCCL timeout of 20 min for problematic models)
+STARTUP_TIMEOUT=900
 BENCHMARK_TIMEOUT=600
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
