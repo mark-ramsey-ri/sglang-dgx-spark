@@ -2,6 +2,8 @@
 
 Deploy [SGLang](https://github.com/sgl-project/sglang) on a dual-node NVIDIA DGX Spark cluster with InfiniBand RDMA for serving large language models like GPT-OSS 120B.
 
+> **DISCLAIMER**: This project is NOT affiliated with, endorsed by, or officially supported by NVIDIA, SGLang, LMSYS, or any other organization. This is a community-driven effort to run SGLang on DGX Spark hardware. Use at your own risk. The software is provided "AS IS", without warranty of any kind.
+
 ## Features
 
 - **Single-command deployment** - Start entire cluster from head node via SSH
@@ -547,10 +549,15 @@ sglang-dgx-spark/
 
 - [SGLang Documentation](https://docs.sglang.io/)
 - [SGLang Multi-Node Deployment](https://docs.sglang.io/references/multi_node_deployment/multi_node_index.html)
+- [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) - Container build approach reference for DGX Spark
 - [NVIDIA DGX Spark SGLang Playbook](https://build.nvidia.com/spark/sglang)
 - [SGLang on DGX Spark Forum](https://forums.developer.nvidia.com/t/run-sglang-in-spark/348863)
 - [GPT-OSS Announcement](https://lmsys.org/blog/2025-11-03-gpt-oss-on-nvidia-dgx-spark/)
 - [SGLang GitHub](https://github.com/sgl-project/sglang)
+
+## Acknowledgments
+
+Container build approach inspired by [Eugene R (@eugr)](https://github.com/eugr)'s work on [spark-vllm-docker](https://github.com/eugr/spark-vllm-docker).
 
 ## License
 

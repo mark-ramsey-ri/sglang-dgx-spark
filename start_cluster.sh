@@ -55,9 +55,11 @@ NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-5}"
 NCCL_TIMEOUT="${NCCL_TIMEOUT:-1200000}"  # 20 minutes in ms (default is 5 min)
 
 # Worker configuration
-# WORKER_IPS: Space-separated list of worker InfiniBand IPs
-# If not set, will be auto-discovered or prompted
-WORKER_IPS="${WORKER_IPS:-}"
+# WORKER_HOST: Ethernet IP for SSH access (e.g., 192.168.7.111)
+# WORKER_IB_IP: InfiniBand IP for NCCL communication (e.g., 169.254.216.8)
+# Legacy WORKER_IPS is supported for backwards compatibility
+WORKER_HOST="${WORKER_HOST:-}"
+WORKER_IB_IP="${WORKER_IB_IP:-${WORKER_IPS:-}}"  # Fallback to WORKER_IPS for backwards compat
 WORKER_USER="${WORKER_USER:-$(whoami)}"
 WORKER_SCRIPT_PATH="${WORKER_SCRIPT_PATH:-${SCRIPT_DIR}}"
 
@@ -136,18 +138,27 @@ while [[ $# -gt 0 ]]; do
       SKIP_PULL=true
       shift
       ;;
-    --worker-ip)
-      WORKER_IPS="$2"
+    --worker-ip|--worker-ib-ip)
+      WORKER_IB_IP="$2"
+      shift 2
+      ;;
+    --worker-host)
+      WORKER_HOST="$2"
       shift 2
       ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --head-only       Only start head node (don't SSH to workers)"
-      echo "  --skip-pull       Skip Docker image pull (faster restart)"
-      echo "  --worker-ip IP    Specify worker IP (can be used multiple times)"
-      echo "  -h, --help        Show this help"
+      echo "  --head-only          Only start head node (don't SSH to workers)"
+      echo "  --skip-pull          Skip Docker image pull (faster restart)"
+      echo "  --worker-host IP     Worker Ethernet IP for SSH (e.g., 192.168.7.111)"
+      echo "  --worker-ib-ip IP    Worker InfiniBand IP for NCCL (e.g., 169.254.216.8)"
+      echo "  -h, --help           Show this help"
+      echo ""
+      echo "Environment variables (recommended):"
+      echo "  WORKER_HOST          Worker Ethernet IP for SSH"
+      echo "  WORKER_IB_IP         Worker InfiniBand IP for NCCL"
       echo ""
       echo "Configuration is read from config.env or config.local.env"
       echo ""
@@ -165,7 +176,7 @@ done
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if [ "${HEAD_ONLY}" != "true" ] && [ "${NUM_NODES}" -gt 1 ]; then
-  if [ -z "${WORKER_IPS}" ]; then
+  if [ -z "${WORKER_IB_IP}" ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo " Worker Configuration Required"
@@ -173,28 +184,32 @@ if [ "${HEAD_ONLY}" != "true" ] && [ "${NUM_NODES}" -gt 1 ]; then
     echo ""
     echo "This is a ${NUM_NODES}-node cluster but no worker IPs are configured."
     echo ""
-    echo "Please set WORKER_IPS in config.env or config.local.env:"
-    echo "  WORKER_IPS=\"169.254.x.x\"           # Single worker"
-    echo "  WORKER_IPS=\"169.254.x.x 169.254.y.y\"  # Multiple workers"
-    echo ""
-    echo "Or specify on command line:"
-    echo "  $0 --worker-ip 169.254.x.x"
+    echo "Please set these environment variables:"
+    echo "  export WORKER_HOST=\"192.168.x.x\"    # Ethernet IP for SSH"
+    echo "  export WORKER_IB_IP=\"169.254.x.x\"   # InfiniBand IP for NCCL"
     echo ""
     echo "Or start head only:"
     echo "  $0 --head-only"
     echo ""
-    echo "To find worker IPs, run on each worker node:"
-    echo "  ibdev2netdev  # Shows IB interface"
-    echo "  ip addr show <interface> | grep inet"
+    echo "To find worker IPs, run on the worker node:"
+    echo "  hostname -I                          # Shows all IPs"
+    echo "  ibdev2netdev && ip addr show <ib_if> # Shows IB interface IP"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     exit 1
   fi
+
+  # If WORKER_HOST not set, fall back to WORKER_IB_IP for SSH (backwards compat)
+  if [ -z "${WORKER_HOST}" ]; then
+    log "Warning: WORKER_HOST not set, using WORKER_IB_IP (${WORKER_IB_IP}) for SSH"
+    WORKER_HOST="${WORKER_IB_IP}"
+  fi
 fi
 
-# Convert WORKER_IPS to array
-read -ra WORKER_IP_ARRAY <<< "${WORKER_IPS}"
-ACTUAL_NUM_WORKERS=${#WORKER_IP_ARRAY[@]}
+# Convert WORKER_IB_IP to array (supports multiple workers: "ip1 ip2 ip3")
+read -ra WORKER_IB_IP_ARRAY <<< "${WORKER_IB_IP}"
+read -ra WORKER_HOST_ARRAY <<< "${WORKER_HOST}"
+ACTUAL_NUM_WORKERS=${#WORKER_IB_IP_ARRAY[@]}
 
 if [ "${HEAD_ONLY}" != "true" ] && [ "${NUM_NODES}" -gt 1 ]; then
   EXPECTED_WORKERS=$((NUM_NODES - 1))
@@ -226,7 +241,8 @@ log "  Head IP:         ${HEAD_IP}"
 log "  API Port:        ${SGLANG_PORT}"
 log "  Dist Init Port:  ${DIST_INIT_PORT}"
 if [ "${HEAD_ONLY}" != "true" ] && [ "${ACTUAL_NUM_WORKERS}" -gt 0 ]; then
-  log "  Worker IPs:      ${WORKER_IPS}"
+  log "  Worker Host:     ${WORKER_HOST} (SSH)"
+  log "  Worker IB IP:    ${WORKER_IB_IP} (NCCL)"
 fi
 log ""
 
@@ -280,16 +296,19 @@ if [ "${HEAD_ONLY}" != "true" ] && [ "${ACTUAL_NUM_WORKERS}" -gt 0 ]; then
   log "Step 4: Starting workers via SSH"
 
   NODE_RANK=1
-  for WORKER_IP in "${WORKER_IP_ARRAY[@]}"; do
-    log "  Starting worker at ${WORKER_IP} (node-rank ${NODE_RANK})..."
+  for i in "${!WORKER_IB_IP_ARRAY[@]}"; do
+    WORKER_IB="${WORKER_IB_IP_ARRAY[$i]}"
+    # Use WORKER_HOST for SSH if available, otherwise fall back to IB IP
+    SSH_HOST="${WORKER_HOST_ARRAY[$i]:-${WORKER_IB}}"
+    log "  Starting worker at ${SSH_HOST} (IB: ${WORKER_IB}, node-rank ${NODE_RANK})..."
 
     # Test SSH connectivity
-    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${WORKER_USER}@${WORKER_IP}" "echo ok" >/dev/null 2>&1; then
-      error "Cannot SSH to ${WORKER_USER}@${WORKER_IP}. Check SSH keys and connectivity."
+    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${WORKER_USER}@${SSH_HOST}" "echo ok" >/dev/null 2>&1; then
+      error "Cannot SSH to ${WORKER_USER}@${SSH_HOST}. Check SSH keys and connectivity."
     fi
 
     # Start worker in background via SSH
-    ssh "${WORKER_USER}@${WORKER_IP}" bash -s << WORKER_EOF &
+    ssh "${WORKER_USER}@${SSH_HOST}" bash -s << WORKER_EOF &
 set -e
 
 # Configuration passed from head
@@ -562,8 +581,9 @@ echo "  ./benchmark_sglang.sh --quick"
 echo ""
 echo "Logs:"
 echo "  docker logs -f ${HEAD_CONTAINER_NAME}"
-for WORKER_IP in "${WORKER_IP_ARRAY[@]}"; do
-  echo "  ssh ${WORKER_USER}@${WORKER_IP} docker logs -f sglang-worker-*"
+for i in "${!WORKER_IB_IP_ARRAY[@]}"; do
+  SSH_HOST="${WORKER_HOST_ARRAY[$i]:-${WORKER_IB_IP_ARRAY[$i]}}"
+  echo "  ssh ${WORKER_USER}@${SSH_HOST} docker logs -f sglang-worker-*"
 done
 echo ""
 echo "Stop Cluster:"

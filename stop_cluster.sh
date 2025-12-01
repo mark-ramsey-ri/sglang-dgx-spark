@@ -19,7 +19,8 @@ fi
 
 HEAD_CONTAINER_NAME="${HEAD_CONTAINER_NAME:-sglang-head}"
 WORKER_CONTAINER_NAME="${WORKER_CONTAINER_NAME:-sglang-worker}"
-WORKER_IPS="${WORKER_IPS:-}"
+# Support both new (WORKER_HOST) and legacy (WORKER_IPS) variable names
+WORKER_HOST="${WORKER_HOST:-${WORKER_IPS:-}}"
 WORKER_USER="${WORKER_USER:-$(whoami)}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -96,7 +97,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "By default, this script will:"
       echo "  1. Stop containers on the head node (local)"
-      echo "  2. SSH to all workers in WORKER_IPS and stop their containers"
+      echo "  2. SSH to all workers in WORKER_HOST and stop their containers"
       echo ""
       exit 0
       ;;
@@ -117,14 +118,14 @@ echo " SGLang Cluster Shutdown"
 echo "============================================================="
 echo ""
 
-# Convert WORKER_IPS to array
-read -ra WORKER_IP_ARRAY <<< "${WORKER_IPS}"
+# Convert WORKER_HOST to array (for SSH access to workers)
+read -ra WORKER_HOST_ARRAY <<< "${WORKER_HOST}"
 
 # Show what will be stopped
 log "Will stop SGLang on:"
 echo "  - Head node (local)"
-if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_IP_ARRAY[@]} -gt 0 ]; then
-  for ip in "${WORKER_IP_ARRAY[@]}"; do
+if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_HOST_ARRAY[@]} -gt 0 ]; then
+  for ip in "${WORKER_HOST_ARRAY[@]}"; do
     echo "  - Worker: ${ip}"
   done
 fi
@@ -158,9 +159,9 @@ fi
 # Stop workers first (if configured)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_IP_ARRAY[@]} -gt 0 ]; then
+if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_HOST_ARRAY[@]} -gt 0 ]; then
   log "Stopping workers..."
-  for ip in "${WORKER_IP_ARRAY[@]}"; do
+  for ip in "${WORKER_HOST_ARRAY[@]}"; do
     stop_remote_containers "${ip}" "${WORKER_USER}" || true
   done
   echo ""
@@ -202,8 +203,8 @@ log "Cluster shutdown complete"
 echo ""
 echo "Stopped:"
 echo "  - ${STOPPED} container(s) on head node"
-if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_IP_ARRAY[@]} -gt 0 ]; then
-  echo "  - Containers on ${#WORKER_IP_ARRAY[@]} worker node(s)"
+if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_HOST_ARRAY[@]} -gt 0 ]; then
+  echo "  - Containers on ${#WORKER_HOST_ARRAY[@]} worker node(s)"
 fi
 echo ""
 echo "============================================================="
