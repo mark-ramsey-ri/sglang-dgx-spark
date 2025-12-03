@@ -1,3 +1,6 @@
+# Claude Code instructions (not needed in repo)
+CLAUDE.md
+
 # Local configuration (contains secrets like HF_TOKEN, IPs)
 config.local.env
 

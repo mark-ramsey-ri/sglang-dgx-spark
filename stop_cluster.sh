@@ -20,7 +20,8 @@ fi
 HEAD_CONTAINER_NAME="${HEAD_CONTAINER_NAME:-sglang-head}"
 WORKER_CONTAINER_NAME="${WORKER_CONTAINER_NAME:-sglang-worker}"
 # Support both new (WORKER_HOST) and legacy (WORKER_IPS) variable names
-WORKER_HOST="${WORKER_HOST:-${WORKER_IPS:-}}"
+# Also fall back to WORKER_IB_IP if WORKER_HOST is not set
+WORKER_HOST="${WORKER_HOST:-${WORKER_IPS:-${WORKER_IB_IP:-}}}"
 WORKER_USER="${WORKER_USER:-$(whoami)}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -50,19 +51,23 @@ stop_remote_containers() {
 
   log "  Stopping containers on ${host}..."
 
-  if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${user}@${host}" "echo ok" >/dev/null 2>&1; then
+  # Use consistent SSH options for both connectivity check and command execution
+  local SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+  if ! ssh ${SSH_OPTS} "${user}@${host}" "echo ok" >/dev/null 2>&1; then
     log "  Warning: Cannot SSH to ${user}@${host}, skipping"
     return 1
   fi
 
-  ssh "${user}@${host}" bash -s << 'REMOTE_EOF'
+  # Execute container stop/remove on remote host
+  ssh ${SSH_OPTS} "${user}@${host}" bash -s << 'REMOTE_EOF'
 # Stop all sglang-* containers on remote node
 CONTAINERS=$(docker ps -a --format '{{.Names}}' | grep -E "^sglang-" || true)
 if [ -n "${CONTAINERS}" ]; then
   for c in ${CONTAINERS}; do
-    docker stop "${c}" >/dev/null 2>&1 || true
-    docker rm -f "${c}" >/dev/null 2>&1 || true
-    echo "    Stopped ${c}"
+    echo "    Stopping ${c}..."
+    docker stop "${c}" 2>&1 || echo "    Warning: Failed to stop ${c}"
+    docker rm -f "${c}" 2>&1 || echo "    Warning: Failed to remove ${c}"
   done
 else
   echo "    No SGLang containers found"
@@ -119,12 +124,16 @@ echo "============================================================="
 echo ""
 
 # Convert WORKER_HOST to array (for SSH access to workers)
-read -ra WORKER_HOST_ARRAY <<< "${WORKER_HOST}"
+# Initialize as empty array first to avoid set -u issues
+WORKER_HOST_ARRAY=()
+if [ -n "${WORKER_HOST:-}" ]; then
+  read -ra WORKER_HOST_ARRAY <<< "${WORKER_HOST}"
+fi
 
 # Show what will be stopped
 log "Will stop SGLang on:"
 echo "  - Head node (local)"
-if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_HOST_ARRAY[@]} -gt 0 ]; then
+if [ "${LOCAL_ONLY}" != "true" ] && [ "${#WORKER_HOST_ARRAY[@]}" -gt 0 ]; then
   for ip in "${WORKER_HOST_ARRAY[@]}"; do
     echo "  - Worker: ${ip}"
   done
@@ -159,7 +168,7 @@ fi
 # Stop workers first (if configured)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_HOST_ARRAY[@]} -gt 0 ]; then
+if [ "${LOCAL_ONLY}" != "true" ] && [ "${#WORKER_HOST_ARRAY[@]}" -gt 0 ]; then
   log "Stopping workers..."
   for ip in "${WORKER_HOST_ARRAY[@]}"; do
     stop_remote_containers "${ip}" "${WORKER_USER}" || true
@@ -203,7 +212,7 @@ log "Cluster shutdown complete"
 echo ""
 echo "Stopped:"
 echo "  - ${STOPPED} container(s) on head node"
-if [ "${LOCAL_ONLY}" != "true" ] && [ ${#WORKER_HOST_ARRAY[@]} -gt 0 ]; then
+if [ "${LOCAL_ONLY}" != "true" ] && [ "${#WORKER_HOST_ARRAY[@]}" -gt 0 ]; then
   echo "  - Containers on ${#WORKER_HOST_ARRAY[@]} worker node(s)"
 fi
 echo ""

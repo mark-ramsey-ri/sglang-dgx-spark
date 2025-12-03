@@ -1,12 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SGLang Comprehensive Benchmark Script
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Similar to vLLM's bench_serving, uses SGLang's built-in benchmark tool
-# with various workload patterns for comprehensive performance testing.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+################################################################################
+# SGLang Benchmark Script
+#
+# Benchmarks the currently running SGLang server using OpenAI-compatible
+# API endpoints with realistic workloads. Uses the same methodology as
+# TensorRT-LLM and vLLM benchmarks for fair comparison.
+#
+# Usage:
+#   ./benchmark_current.sh [options]
+#
+# Options:
+#   -u, --url URL           SGLang API URL (default: auto-detect)
+#   -n, --num-prompts N     Number of prompts to benchmark (default: 100)
+#   -c, --concurrency N     Max concurrent requests (default: 32)
+#   -d, --dataset PATH      Path to ShareGPT dataset JSON (auto-downloads if missing)
+#   -s, --single            Run single-request benchmark only (1 prompt)
+#   -q, --quick             Quick mode: 20 prompts, lower concurrency
+#   -o, --output FILE       Output results to JSON file
+#   -h, --help              Show this help message
+#
+# Examples:
+#   ./benchmark_current.sh                    # Full benchmark (100 prompts)
+#   ./benchmark_current.sh --quick            # Quick benchmark (20 prompts)
+#   ./benchmark_current.sh --single           # Single request latency test
+#   ./benchmark_current.sh -n 50 -c 16        # Custom prompts/concurrency
+#
+################################################################################
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -17,427 +47,459 @@ elif [ -f "${SCRIPT_DIR}/config.env" ]; then
   source "${SCRIPT_DIR}/config.env"
 fi
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Configuration
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-SGLANG_HOST="${SGLANG_HOST:-127.0.0.1}"
+# Default configuration
 SGLANG_PORT="${SGLANG_PORT:-30000}"
-MODEL="${MODEL:-openai/gpt-oss-120b}"
-SGLANG_IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang:spark}"
+API_URL=""
+NUM_PROMPTS=100
+MAX_CONCURRENCY=32
+DATASET_PATH=""
+SINGLE_MODE=false
+QUICK_MODE=false
+OUTPUT_FILE=""
+MODEL=""
 
 # Output directory for results
-OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/benchmark_results}"
+OUTPUT_DIR="${SCRIPT_DIR}/benchmark_results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Benchmark Profiles
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Default dataset location
+DEFAULT_DATASET="ShareGPT_V3_unfiltered_cleaned_split.json"
+DATASET_URL="https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
 
-# Default: Quick sanity test
-PROFILE="quick"
-NUM_PROMPTS=10
-INPUT_LEN=128
-OUTPUT_LEN=128
-REQUEST_RATE="inf"
-MAX_CONCURRENCY=""
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Helper Functions
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-log() {
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
-}
-
-error() {
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2
-  exit 1
-}
-
-check_server() {
-  curl -sf "http://${SGLANG_HOST}:${SGLANG_PORT}/health" >/dev/null 2>&1
-}
-
-usage() {
-  cat << EOF
-Usage: $0 [OPTIONS] [PROFILE]
-
-Profiles:
-  quick       Quick sanity test (10 prompts, 128 in/out)
-  short       Short benchmark (50 prompts, 256 in/out)
-  medium      Medium benchmark (100 prompts, 512 in/out)
-  long        Long benchmark (200 prompts, 1024 in/out)
-  throughput  Max throughput test (500 prompts, concurrent)
-  latency     Latency-focused test (100 prompts, rate-limited)
-  stress      Stress test (1000 prompts, high concurrency)
-  custom      Use custom settings from options
-
-Options:
-  -h, --host HOST          Server host (default: ${SGLANG_HOST})
-  -p, --port PORT          Server port (default: ${SGLANG_PORT})
-  -n, --num-prompts N      Number of prompts (default: ${NUM_PROMPTS})
-  -i, --input-len N        Input token length (default: ${INPUT_LEN})
-  -o, --output-len N       Output token length (default: ${OUTPUT_LEN})
-  -r, --request-rate R     Request rate (default: inf)
-  -c, --concurrency N      Max concurrent requests
-  --output-dir DIR         Output directory for results
-  --no-docker              Run bench_serving natively (requires sglang installed)
-  --help                   Show this help
-
-Examples:
-  $0 quick                 # Quick 10-request test
-  $0 throughput            # Max throughput benchmark
-  $0 -n 50 -i 256 -o 512   # Custom settings
-  $0 latency -r 1          # 1 request/second latency test
-
-EOF
-  exit 0
-}
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Parse Arguments
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-USE_DOCKER=true
-CUSTOM_SETTINGS=false
-
+# Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    quick|short|medium|long|throughput|latency|stress|custom)
-      PROFILE="$1"
-      shift
-      ;;
-    -h|--host)
-      SGLANG_HOST="$2"
-      shift 2
-      ;;
-    -p|--port)
-      SGLANG_PORT="$2"
+    -u|--url)
+      API_URL="$2"
       shift 2
       ;;
     -n|--num-prompts)
       NUM_PROMPTS="$2"
-      CUSTOM_SETTINGS=true
-      shift 2
-      ;;
-    -i|--input-len)
-      INPUT_LEN="$2"
-      CUSTOM_SETTINGS=true
-      shift 2
-      ;;
-    -o|--output-len)
-      OUTPUT_LEN="$2"
-      CUSTOM_SETTINGS=true
-      shift 2
-      ;;
-    -r|--request-rate)
-      REQUEST_RATE="$2"
-      CUSTOM_SETTINGS=true
       shift 2
       ;;
     -c|--concurrency)
       MAX_CONCURRENCY="$2"
-      CUSTOM_SETTINGS=true
       shift 2
       ;;
-    --output-dir)
-      OUTPUT_DIR="$2"
+    -d|--dataset)
+      DATASET_PATH="$2"
       shift 2
       ;;
-    --no-docker)
-      USE_DOCKER=false
+    -s|--single)
+      SINGLE_MODE=true
+      NUM_PROMPTS=1
+      MAX_CONCURRENCY=1
       shift
       ;;
-    --help)
-      usage
+    -q|--quick)
+      QUICK_MODE=true
+      NUM_PROMPTS=20
+      MAX_CONCURRENCY=16
+      shift
+      ;;
+    -o|--output)
+      OUTPUT_FILE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      head -35 "$0" | tail -30
+      exit 0
       ;;
     *)
       echo "Unknown option: $1"
-      usage
+      exit 1
       ;;
   esac
 done
 
-# Apply profile settings (unless custom settings were provided)
-if [ "${CUSTOM_SETTINGS}" != "true" ]; then
-  case ${PROFILE} in
-    quick)
-      NUM_PROMPTS=10
-      INPUT_LEN=128
-      OUTPUT_LEN=128
-      REQUEST_RATE="inf"
-      ;;
-    short)
-      NUM_PROMPTS=50
-      INPUT_LEN=256
-      OUTPUT_LEN=256
-      REQUEST_RATE="inf"
-      ;;
-    medium)
-      NUM_PROMPTS=100
-      INPUT_LEN=512
-      OUTPUT_LEN=512
-      REQUEST_RATE="inf"
-      ;;
-    long)
-      NUM_PROMPTS=200
-      INPUT_LEN=1024
-      OUTPUT_LEN=1024
-      REQUEST_RATE="inf"
-      ;;
-    throughput)
-      NUM_PROMPTS=500
-      INPUT_LEN=256
-      OUTPUT_LEN=256
-      REQUEST_RATE="inf"
-      MAX_CONCURRENCY=64
-      ;;
-    latency)
-      NUM_PROMPTS=100
-      INPUT_LEN=128
-      OUTPUT_LEN=128
-      REQUEST_RATE=2
-      ;;
-    stress)
-      NUM_PROMPTS=1000
-      INPUT_LEN=512
-      OUTPUT_LEN=512
-      REQUEST_RATE="inf"
-      MAX_CONCURRENCY=128
-      ;;
-  esac
-fi
+print_header() {
+  echo ""
+  echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${BOLD}$1${NC}"
+  echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+print_ok() {
+  echo -e "${GREEN}✓${NC} $1"
+}
+
+print_warn() {
+  echo -e "${YELLOW}⚠${NC} $1"
+}
+
+print_fail() {
+  echo -e "${RED}✗${NC} $1"
+}
+
+print_info() {
+  echo -e "${CYAN}ℹ${NC} $1"
+}
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Setup Output Directory
+print_header "SGLang Benchmark"
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Auto-detect API URL if not provided
+if [ -z "$API_URL" ]; then
+  if curl -sf "http://localhost:${SGLANG_PORT}/health" >/dev/null 2>&1; then
+    API_URL="http://localhost:${SGLANG_PORT}"
+  else
+    PUBLIC_IP=$(ip -o addr show | grep "inet " | grep -v "127.0.0.1" | grep -v "172.17" | awk '{print $4}' | cut -d'/' -f1 | head -1)
+    if [ -n "$PUBLIC_IP" ] && curl -sf "http://${PUBLIC_IP}:${SGLANG_PORT}/health" >/dev/null 2>&1; then
+      API_URL="http://${PUBLIC_IP}:${SGLANG_PORT}"
+    else
+      API_URL="http://localhost:${SGLANG_PORT}"
+    fi
+  fi
+fi
+
+echo ""
+echo -e "  ${BOLD}Configuration:${NC}"
+echo -e "    API URL:      ${CYAN}${API_URL}${NC}"
+echo -e "    Num Prompts:  ${CYAN}${NUM_PROMPTS}${NC}"
+echo -e "    Concurrency:  ${CYAN}${MAX_CONCURRENCY}${NC}"
+if [ "$SINGLE_MODE" = true ]; then
+  echo -e "    Mode:         ${CYAN}Single Request (latency test)${NC}"
+elif [ "$QUICK_MODE" = true ]; then
+  echo -e "    Mode:         ${CYAN}Quick${NC}"
+else
+  echo -e "    Mode:         ${CYAN}Full${NC}"
+fi
+echo ""
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Check SGLang availability
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+echo -e "${CYAN}▶${NC} Checking SGLang availability..."
+
+if ! curl -sf "${API_URL}/health" >/dev/null 2>&1; then
+  print_fail "SGLang is not accessible at ${API_URL}"
+  echo "    Make sure SGLang is running: ./start_cluster.sh"
+  exit 1
+fi
+print_ok "SGLang is accessible"
+
+# Get model name from API
+MODEL=$(curl -sf "${API_URL}/v1/models" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo "unknown")
+if [ "$MODEL" = "unknown" ]; then
+  print_fail "Could not detect model from SGLang API"
+  exit 1
+fi
+print_ok "Model: ${MODEL}"
+echo ""
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Download ShareGPT dataset if needed
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+echo -e "${CYAN}▶${NC} Checking ShareGPT dataset..."
+
+if [ -z "$DATASET_PATH" ]; then
+  if [ -f "./${DEFAULT_DATASET}" ]; then
+    DATASET_PATH="./${DEFAULT_DATASET}"
+  elif [ -f "/tmp/${DEFAULT_DATASET}" ]; then
+    DATASET_PATH="/tmp/${DEFAULT_DATASET}"
+  else
+    print_info "Downloading ShareGPT dataset..."
+    if ! curl -sL "${DATASET_URL}" -o "/tmp/${DEFAULT_DATASET}"; then
+      print_fail "Failed to download dataset"
+      exit 1
+    fi
+    DATASET_PATH="/tmp/${DEFAULT_DATASET}"
+  fi
+fi
+
+if [ ! -f "${DATASET_PATH}" ]; then
+  print_fail "Dataset not found at ${DATASET_PATH}"
+  exit 1
+fi
+
+DATASET_SIZE=$(wc -c < "${DATASET_PATH}" 2>/dev/null || echo "unknown")
+print_ok "Dataset ready: ${DATASET_PATH} (${DATASET_SIZE} bytes)"
+echo ""
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Setup output directory and file
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 mkdir -p "${OUTPUT_DIR}"
-OUTPUT_FILE="${OUTPUT_DIR}/bench_${PROFILE}_${TIMESTAMP}.json"
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Main Script
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " SGLang Benchmark - ${PROFILE^^} Profile"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-log "Configuration:"
-log "  Server:         http://${SGLANG_HOST}:${SGLANG_PORT}"
-log "  Model:          ${MODEL}"
-log "  Profile:        ${PROFILE}"
-log "  Num Prompts:    ${NUM_PROMPTS}"
-log "  Input Length:   ${INPUT_LEN} tokens"
-log "  Output Length:  ${OUTPUT_LEN} tokens"
-log "  Request Rate:   ${REQUEST_RATE} req/s"
-[ -n "${MAX_CONCURRENCY}" ] && log "  Max Concurrency: ${MAX_CONCURRENCY}"
-log "  Output File:    ${OUTPUT_FILE}"
-echo ""
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Step 1: Health Check
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-log "Step 1/3: Checking server health..."
-
-if ! check_server; then
-  error "Server is not responding at http://${SGLANG_HOST}:${SGLANG_PORT}
-
-  Make sure the SGLang cluster is running:
-    ./start_cluster.sh
-
-  Then check health:
-    curl http://${SGLANG_HOST}:${SGLANG_PORT}/health"
-fi
-
-log "  Server is healthy"
-
-# Get model info
-MODEL_INFO=$(curl -sf "http://${SGLANG_HOST}:${SGLANG_PORT}/v1/models" 2>/dev/null || echo "{}")
-if [ -n "${MODEL_INFO}" ] && [ "${MODEL_INFO}" != "{}" ]; then
-  SERVED_MODEL=$(echo "${MODEL_INFO}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',[{}])[0].get('id','unknown'))" 2>/dev/null || echo "unknown")
-  log "  Serving model: ${SERVED_MODEL}"
+# Auto-generate output file if not specified
+if [ -z "$OUTPUT_FILE" ]; then
+  OUTPUT_FILE="${OUTPUT_DIR}/bench_${TIMESTAMP}.json"
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Step 2: Warmup
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-log "Step 2/3: Warming up..."
-
-cat > /tmp/warmup_request.json << EOF
-{"model":"${MODEL}","messages":[{"role":"user","content":"Hello, please respond with OK."}],"max_tokens":10}
-EOF
-
-WARMUP_START=$(date +%s.%N)
-curl -sf "http://${SGLANG_HOST}:${SGLANG_PORT}/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -d @/tmp/warmup_request.json > /dev/null 2>&1 || true
-WARMUP_END=$(date +%s.%N)
-WARMUP_TIME=$(echo "${WARMUP_END} - ${WARMUP_START}" | bc)
-log "  Warmup completed in ${WARMUP_TIME}s"
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Step 3: Run Benchmark
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-log "Step 3/3: Running benchmark..."
-echo ""
-
-# Build benchmark command arguments
-BENCH_ARGS=(
-  --backend sglang-oai
-  --host "${SGLANG_HOST}"
-  --port "${SGLANG_PORT}"
-  --model "${MODEL}"
-  --dataset-name random
-  --num-prompts "${NUM_PROMPTS}"
-  --random-input-len "${INPUT_LEN}"
-  --random-output-len "${OUTPUT_LEN}"
-  --request-rate "${REQUEST_RATE}"
-  --output-file "/tmp/benchmark_output.json"
-)
-
-# Add optional arguments
-[ -n "${MAX_CONCURRENCY}" ] && BENCH_ARGS+=(--max-concurrency "${MAX_CONCURRENCY}")
-
-# Clear any existing output file to prevent appending
-# Use docker to remove in case it was created by a container (root ownership)
-if [ "${USE_DOCKER}" = "true" ]; then
-  docker run --rm -v /tmp:/tmp "${SGLANG_IMAGE}" rm -f /tmp/benchmark_output.json 2>/dev/null || true
-fi
-rm -f /tmp/benchmark_output.json 2>/dev/null || true
-
 # Run benchmark
-BENCH_START=$(date +%s.%N)
-
-if [ "${USE_DOCKER}" = "true" ]; then
-  docker run --rm --network host \
-    -v /tmp:/tmp \
-    -e "HF_TOKEN=${HF_TOKEN:-}" \
-    -e "HF_HOME=/root/.cache/huggingface" \
-    "${SGLANG_IMAGE}" \
-    python3 -m sglang.bench_serving "${BENCH_ARGS[@]}"
-else
-  python3 -m sglang.bench_serving "${BENCH_ARGS[@]}"
-fi
-
-BENCH_END=$(date +%s.%N)
-BENCH_DURATION=$(echo "${BENCH_END} - ${BENCH_START}" | bc)
-
-# Copy output file
-if [ -f /tmp/benchmark_output.json ]; then
-  cp /tmp/benchmark_output.json "${OUTPUT_FILE}"
-fi
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Parse and Display Results
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+print_header "Running Benchmark"
+
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Benchmark Results"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "  ${BOLD}Test Parameters:${NC}"
+echo -e "    Model:        ${MODEL}"
+echo -e "    Prompts:      ${NUM_PROMPTS}"
+echo -e "    Concurrency:  ${MAX_CONCURRENCY}"
+echo -e "    Dataset:      ShareGPT_V3"
 echo ""
 
-if [ -f "${OUTPUT_FILE}" ]; then
-  # Parse results from JSON
-  python3 << PARSE_SCRIPT
+# Create Python benchmark script
+BENCH_SCRIPT="/tmp/sglang_benchmark_$$.py"
+
+cat > "${BENCH_SCRIPT}" << 'PYTHON_SCRIPT'
+#!/usr/bin/env python3
+"""
+SGLang Benchmark Script using OpenAI-compatible API
+Unified format matching TensorRT-LLM and vLLM benchmarks
+"""
+
+import argparse
 import json
-import sys
+import time
+import random
+import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from typing import List
+import urllib.request
+import urllib.error
 
-try:
-    with open("${OUTPUT_FILE}", "r") as f:
+@dataclass
+class BenchmarkResult:
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    latencies: List[float] = field(default_factory=list)
+    ttfts: List[float] = field(default_factory=list)
+    start_time: float = 0
+    end_time: float = 0
+
+def load_sharegpt_prompts(dataset_path: str, num_prompts: int) -> List[str]:
+    """Load prompts from ShareGPT dataset."""
+    with open(dataset_path, 'r') as f:
         data = json.load(f)
 
+    prompts = []
+    for item in data:
+        conversations = item.get('conversations', [])
+        for conv in conversations:
+            if conv.get('from') == 'human':
+                prompt = conv.get('value', '')
+                if 50 < len(prompt) < 2000:  # Filter reasonable length prompts
+                    prompts.append(prompt)
+                    if len(prompts) >= num_prompts * 2:  # Get more than needed for random selection
+                        break
+        if len(prompts) >= num_prompts * 2:
+            break
+
+    # Random sample
+    if len(prompts) > num_prompts:
+        prompts = random.sample(prompts, num_prompts)
+
+    return prompts[:num_prompts]
+
+def make_request(api_url: str, model: str, prompt: str, max_tokens: int = 128) -> dict:
+    """Make a single request to the API."""
+    url = f"{api_url}/v1/chat/completions"
+
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.7
+    }).encode('utf-8')
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    start_time = time.perf_counter()
+
+    try:
+        req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=120) as response:
+            response_data = json.loads(response.read().decode('utf-8'))
+
+        end_time = time.perf_counter()
+        latency = (end_time - start_time) * 1000  # Convert to ms
+
+        usage = response_data.get('usage', {})
+        output_tokens = usage.get('completion_tokens', 0)
+        input_tokens = usage.get('prompt_tokens', 0)
+
+        return {
+            'success': True,
+            'latency_ms': latency,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'ttft_ms': latency / max(output_tokens, 1) if output_tokens > 0 else latency  # Approximate TTFT
+        }
+    except Exception as e:
+        end_time = time.perf_counter()
+        return {
+            'success': False,
+            'latency_ms': (end_time - start_time) * 1000,
+            'error': str(e),
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'ttft_ms': 0
+        }
+
+def run_benchmark(api_url: str, model: str, prompts: List[str], max_concurrency: int) -> BenchmarkResult:
+    """Run the benchmark with concurrent requests."""
+    result = BenchmarkResult()
+    result.total_requests = len(prompts)
+    result.start_time = time.perf_counter()
+
+    with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+        futures = {executor.submit(make_request, api_url, model, prompt): prompt for prompt in prompts}
+
+        completed = 0
+        for future in as_completed(futures):
+            completed += 1
+            resp = future.result()
+
+            if resp['success']:
+                result.successful_requests += 1
+                result.latencies.append(resp['latency_ms'])
+                result.ttfts.append(resp['ttft_ms'])
+                result.total_input_tokens += resp['input_tokens']
+                result.total_output_tokens += resp['output_tokens']
+            else:
+                result.failed_requests += 1
+
+            if completed % 10 == 0:
+                print(f"    Progress: {completed}/{len(prompts)} requests", flush=True)
+
+    result.end_time = time.perf_counter()
+    return result
+
+def main():
+    parser = argparse.ArgumentParser(description='SGLang Benchmark')
+    parser.add_argument('--api-url', required=True, help='API URL')
+    parser.add_argument('--model', required=True, help='Model name')
+    parser.add_argument('--dataset', required=True, help='Dataset path')
+    parser.add_argument('--num-prompts', type=int, default=100, help='Number of prompts')
+    parser.add_argument('--concurrency', type=int, default=32, help='Max concurrency')
+    parser.add_argument('--output', help='Output JSON file')
+
+    args = parser.parse_args()
+
+    print(f"  Loading {args.num_prompts} prompts from dataset...")
+    prompts = load_sharegpt_prompts(args.dataset, args.num_prompts)
+    print(f"  Loaded {len(prompts)} prompts")
+    print()
+
+    print("  Starting benchmark...")
+    result = run_benchmark(args.api_url, args.model, prompts, args.concurrency)
+
+    # Calculate metrics
+    duration = result.end_time - result.start_time
+
+    if result.latencies:
+        mean_latency = statistics.mean(result.latencies)
+        p50_latency = statistics.median(result.latencies)
+        p99_latency = sorted(result.latencies)[int(len(result.latencies) * 0.99)]
+        mean_ttft = statistics.mean(result.ttfts)
+    else:
+        mean_latency = p50_latency = p99_latency = mean_ttft = 0
+
+    output_tps = result.total_output_tokens / duration if duration > 0 else 0
+    total_tps = (result.total_input_tokens + result.total_output_tokens) / duration if duration > 0 else 0
+    req_throughput = result.successful_requests / duration if duration > 0 else 0
+
+    # Print results in unified format
+    print()
+    print("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("  Benchmark Results")
+    print("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print()
     print("  Test Configuration:")
-    print(f"    Profile:              ${PROFILE}")
-    print(f"    Num Prompts:          {data.get('num_prompts', 'N/A')}")
-    print(f"    Request Rate:         {data.get('request_rate', 'N/A')} req/s")
-    print(f"    Input Length:         ${INPUT_LEN} tokens")
-    print(f"    Output Length:        ${OUTPUT_LEN} tokens")
+    print(f"    Platform:           SGLang")
+    print(f"    Model:              {args.model}")
+    print(f"    Num Prompts:        {args.num_prompts}")
+    print(f"    Concurrency:        {args.concurrency}")
+    print(f"    Dataset:            ShareGPT_V3")
     print()
     print("  Throughput Metrics:")
-    print(f"    Total Duration:       {data.get('total_time', 0):.2f}s")
-    print(f"    Requests/sec:         {data.get('request_throughput', 0):.2f}")
-    print(f"    Input tok/s:          {data.get('input_throughput', 0):.2f}")
-    print(f"    Output tok/s:         {data.get('output_throughput', 0):.2f}")
-    print(f"    Total tok/s:          {data.get('total_throughput', data.get('output_throughput', 0)):.2f}")
+    print(f"    Duration:           {duration:.2f}s")
+    print(f"    Requests/sec:       {req_throughput:.2f}")
+    print(f"    Output tok/s:       {output_tps:.2f}")
+    print(f"    Total tok/s:        {total_tps:.2f}")
     print()
-    print("  Latency Metrics (seconds):")
-
-    # TTFT (Time to First Token)
-    ttft = data.get('ttft_ms', data.get('mean_ttft_ms', 0))
-    if isinstance(ttft, dict):
-        print(f"    TTFT Mean:            {ttft.get('mean', 0)/1000:.3f}s")
-        print(f"    TTFT Median:          {ttft.get('median', ttft.get('p50', 0))/1000:.3f}s")
-        print(f"    TTFT P99:             {ttft.get('p99', 0)/1000:.3f}s")
-    else:
-        print(f"    TTFT Mean:            {ttft/1000:.3f}s")
-
-    # TPOT (Time Per Output Token)
-    tpot = data.get('tpot_ms', data.get('mean_tpot_ms', 0))
-    if isinstance(tpot, dict):
-        print(f"    TPOT Mean:            {tpot.get('mean', 0)/1000:.4f}s")
-        print(f"    TPOT Median:          {tpot.get('median', tpot.get('p50', 0))/1000:.4f}s")
-        print(f"    TPOT P99:             {tpot.get('p99', 0)/1000:.4f}s")
-    else:
-        print(f"    TPOT Mean:            {tpot/1000:.4f}s")
-
-    # ITL (Inter-Token Latency) if available
-    itl = data.get('itl_ms', data.get('mean_itl_ms', None))
-    if itl:
-        if isinstance(itl, dict):
-            print(f"    ITL Mean:             {itl.get('mean', 0)/1000:.4f}s")
-        else:
-            print(f"    ITL Mean:             {itl/1000:.4f}s")
-
-    # E2E Latency
-    e2e = data.get('e2e_latency_ms', data.get('mean_e2e_latency_ms', 0))
-    if isinstance(e2e, dict):
-        print(f"    E2E Mean:             {e2e.get('mean', 0)/1000:.3f}s")
-        print(f"    E2E Median:           {e2e.get('median', e2e.get('p50', 0))/1000:.3f}s")
-        print(f"    E2E P99:              {e2e.get('p99', 0)/1000:.3f}s")
-    else:
-        print(f"    E2E Mean:             {e2e/1000:.3f}s")
-
+    print("  Latency Metrics:")
+    print(f"    Mean Latency:       {mean_latency:.2f} ms")
+    print(f"    P50 Latency:        {p50_latency:.2f} ms")
+    print(f"    P99 Latency:        {p99_latency:.2f} ms")
+    print(f"    Mean TTFT:          {mean_ttft:.2f} ms")
     print()
     print("  Request Statistics:")
-    print(f"    Completed:            {data.get('completed', data.get('num_prompts', 'N/A'))}")
-    print(f"    Failed:               {data.get('failed', 0)}")
+    print(f"    Completed:          {result.successful_requests}/{result.total_requests}")
+    print(f"    Total Input Tokens: {result.total_input_tokens}")
+    print(f"    Total Output Tokens:{result.total_output_tokens}")
+    print()
 
-except Exception as e:
-    print(f"  Error parsing results: {e}")
-    print(f"  Raw output saved to: ${OUTPUT_FILE}")
-PARSE_SCRIPT
+    # Save to JSON if requested
+    if args.output:
+        output_data = {
+            'platform': 'SGLang',
+            'model': args.model,
+            'num_prompts': args.num_prompts,
+            'concurrency': args.concurrency,
+            'dataset': 'ShareGPT_V3',
+            'duration_s': round(duration, 2),
+            'successful_requests': result.successful_requests,
+            'failed_requests': result.failed_requests,
+            'output_throughput_tps': round(output_tps, 2),
+            'total_throughput_tps': round(total_tps, 2),
+            'request_throughput_rps': round(req_throughput, 2),
+            'mean_latency_ms': round(mean_latency, 2),
+            'p50_latency_ms': round(p50_latency, 2),
+            'p99_latency_ms': round(p99_latency, 2),
+            'mean_ttft_ms': round(mean_ttft, 2),
+            'total_input_tokens': result.total_input_tokens,
+            'total_output_tokens': result.total_output_tokens
+        }
+        with open(args.output, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        print(f"  Results saved to: {args.output}")
 
-else
-  echo "  WARNING: No output file generated"
-  echo "  Check if benchmark completed successfully"
-fi
+if __name__ == '__main__':
+    main()
+PYTHON_SCRIPT
+
+# Run the benchmark
+python3 "${BENCH_SCRIPT}" \
+  --api-url "${API_URL}" \
+  --model "${MODEL}" \
+  --dataset "${DATASET_PATH}" \
+  --num-prompts "${NUM_PROMPTS}" \
+  --concurrency "${MAX_CONCURRENCY}" \
+  --output "${OUTPUT_FILE}"
+
+BENCH_EXIT_CODE=$?
+
+# Cleanup
+rm -f "${BENCH_SCRIPT}"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+print_header "Benchmark Complete"
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 echo ""
-log "Benchmark completed in ${BENCH_DURATION}s"
-log "Results saved to: ${OUTPUT_FILE}"
+echo -e "  ${BOLD}Quick Reference Commands:${NC}"
+echo ""
+echo "  # Run single-request latency test"
+echo "  ./benchmark_current.sh --single"
+echo ""
+echo "  # Run quick batch benchmark (20 prompts)"
+echo "  ./benchmark_current.sh --quick"
+echo ""
+echo "  # Run full benchmark with custom output"
+echo "  ./benchmark_current.sh -n 100 -o results.json"
+echo ""
 
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Quick Reference"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "  Run other profiles:"
-echo "    $0 short       # 50 prompts, 256 tokens"
-echo "    $0 medium      # 100 prompts, 512 tokens"
-echo "    $0 throughput  # Max throughput test"
-echo "    $0 latency     # Rate-limited latency test"
-echo ""
-echo "  Custom benchmark:"
-echo "    $0 -n 100 -i 512 -o 1024 -c 32"
-echo ""
-echo "  View saved results:"
-echo "    cat ${OUTPUT_FILE} | python3 -m json.tool"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+exit $BENCH_EXIT_CODE
