@@ -153,15 +153,20 @@ else
 fi
 echo ""
 
-# Confirmation
+# Confirmation. In a non-interactive shell (e.g. piped), the default-no
+# branch silently aborts the user's pipeline; auto-confirm there.
 if [ "${FORCE}" != "true" ]; then
-  read -p "Proceed with shutdown? [y/N] " -n 1 -r
-  echo ""
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    log "Cancelled."
-    exit 0
+  if [ -t 0 ]; then
+    read -p "Proceed with shutdown? [y/N] " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      log "Cancelled."
+      exit 0
+    fi
+    echo ""
+  else
+    log "Non-interactive shell detected; proceeding with shutdown."
   fi
-  echo ""
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -22,17 +22,17 @@ fi
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Docker
-SGLANG_IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang:spark}"
+SGLANG_IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.10.post1-cu130}"
 HEAD_CONTAINER_NAME="${HEAD_CONTAINER_NAME:-sglang-head}"
 WORKER_CONTAINER_NAME="${WORKER_CONTAINER_NAME:-sglang-worker}"
 SHM_SIZE="${SHM_SIZE:-32g}"
 
 # Model
 MODEL="${MODEL:-openai/gpt-oss-120b}"
-TENSOR_PARALLEL="${TENSOR_PARALLEL:-2}"
 PIPELINE_PARALLEL="${PIPELINE_PARALLEL:-1}"
-NUM_NODES="${NUM_NODES:-2}"
 MEM_FRACTION="${MEM_FRACTION:-0.80}"
+# TENSOR_PARALLEL and NUM_NODES default to (1 head + N workers); resolved
+# below once WORKER_HOST_ARRAY is parsed.
 
 # Ports
 SGLANG_PORT="${SGLANG_PORT:-30000}"
@@ -54,12 +54,15 @@ NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
 NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-5}"
 NCCL_TIMEOUT="${NCCL_TIMEOUT:-1200000}"  # 20 minutes in ms (default is 5 min)
 
-# Worker configuration
-# WORKER_HOST: Ethernet IP for SSH access (e.g., 192.168.7.111)
-# WORKER_IB_IP: InfiniBand IP for NCCL communication (e.g., 169.254.216.8)
-# Legacy WORKER_IPS is supported for backwards compatibility
+# Worker configuration. WORKER_HOST and WORKER_IB_IP are space-separated lists
+# with 1:1 positional correspondence (a single value is just N=1).
+#   WORKER_HOST:  Ethernet IP(s) for SSH (e.g., "192.168.7.111 192.168.7.112")
+#   WORKER_IB_IP: InfiniBand IP(s) for NCCL (e.g., "169.254.216.8 169.254.216.9")
+# Legacy WORKER_IPS is supported for backwards compatibility (treated as
+# WORKER_IB_IP when WORKER_IB_IP is unset).
+# Arrays are split AFTER CLI args are parsed (CLI may override these strings).
 WORKER_HOST="${WORKER_HOST:-}"
-WORKER_IB_IP="${WORKER_IB_IP:-${WORKER_IPS:-}}"  # Fallback to WORKER_IPS for backwards compat
+WORKER_IB_IP="${WORKER_IB_IP:-${WORKER_IPS:-}}"
 WORKER_USER="${WORKER_USER:-$(whoami)}"
 WORKER_SCRIPT_PATH="${WORKER_SCRIPT_PATH:-${SCRIPT_DIR}}"
 
@@ -152,13 +155,15 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --head-only          Only start head node (don't SSH to workers)"
       echo "  --skip-pull          Skip Docker image pull (faster restart)"
-      echo "  --worker-host IP     Worker Ethernet IP for SSH (e.g., 192.168.7.111)"
-      echo "  --worker-ib-ip IP    Worker InfiniBand IP for NCCL (e.g., 169.254.216.8)"
+      echo "  --worker-host IP[s]  Worker Ethernet IP(s) for SSH, space-separated for >1"
+      echo "  --worker-ib-ip IP[s] Worker InfiniBand IP(s) for NCCL, 1:1 with --worker-host"
       echo "  -h, --help           Show this help"
       echo ""
       echo "Environment variables (recommended):"
-      echo "  WORKER_HOST          Worker Ethernet IP for SSH"
-      echo "  WORKER_IB_IP         Worker InfiniBand IP for NCCL"
+      echo "  WORKER_HOST          Ethernet IP(s), space-separated for 1-N workers"
+      echo "                         single:  WORKER_HOST=\"192.168.7.111\""
+      echo "                         3-Spark: WORKER_HOST=\"192.168.7.111 192.168.7.112 192.168.7.113\""
+      echo "  WORKER_IB_IP         InfiniBand IP(s), 1:1 positional with WORKER_HOST"
       echo ""
       echo "Configuration is read from config.env or config.local.env"
       echo ""
@@ -172,52 +177,93 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Parse worker arrays (after CLI args; CLI may override the strings)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Split into arrays. read -ra on an empty string yields an empty array.
+read -ra WORKER_HOST_ARRAY <<< "${WORKER_HOST}"
+read -ra WORKER_IB_IP_ARRAY <<< "${WORKER_IB_IP}"
+WORKER_COUNT="${#WORKER_HOST_ARRAY[@]}"
+
+# Backwards-compat path: legacy single-worker setups sometimes only set
+# WORKER_IB_IP (via WORKER_IPS) and rely on it for SSH too. Mirror it back
+# into WORKER_HOST so the rest of the script doesn't need a special case.
+# Must run BEFORE the cardinality check below.
+if [ "${WORKER_COUNT}" -eq 0 ] && [ "${#WORKER_IB_IP_ARRAY[@]}" -gt 0 ]; then
+  WORKER_HOST_ARRAY=("${WORKER_IB_IP_ARRAY[@]}")
+  WORKER_HOST="${WORKER_IB_IP}"
+  WORKER_COUNT="${#WORKER_HOST_ARRAY[@]}"
+fi
+
+# Validate WORKER_IB_IP cardinality: must match WORKER_HOST when given.
+if [ "${#WORKER_IB_IP_ARRAY[@]}" -gt 0 ] && [ "${#WORKER_IB_IP_ARRAY[@]}" -ne "${WORKER_COUNT}" ]; then
+  echo "ERROR: WORKER_IB_IP has ${#WORKER_IB_IP_ARRAY[@]} entries but WORKER_HOST has ${WORKER_COUNT}."
+  echo "       They must be 1:1 positional: WORKER_HOST=\"a b c\" needs WORKER_IB_IP=\"x y z\"."
+  exit 1
+fi
+
+# When WORKER_IB_IP is unset, mirror WORKER_HOST so per-worker NCCL IPs are
+# always available downstream (NCCL just talks over the SSH path).
+if [ "${#WORKER_IB_IP_ARRAY[@]}" -eq 0 ] && [ "${WORKER_COUNT}" -gt 0 ]; then
+  WORKER_IB_IP_ARRAY=("${WORKER_HOST_ARRAY[@]}")
+  WORKER_IB_IP="${WORKER_HOST}"
+fi
+
+# Defaults that scale with cluster size: 1 head + N workers, 1 GPU per Spark.
+NUM_NODES="${NUM_NODES:-$((WORKER_COUNT + 1))}"
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-${NUM_NODES}}"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Validate Worker Configuration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-if [ "${HEAD_ONLY}" != "true" ] && [ "${NUM_NODES}" -gt 1 ]; then
-  if [ -z "${WORKER_IB_IP}" ]; then
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo " Worker Configuration Required"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "This is a ${NUM_NODES}-node cluster but no worker IPs are configured."
-    echo ""
-    echo "Please set these environment variables:"
-    echo "  export WORKER_HOST=\"192.168.x.x\"    # Ethernet IP for SSH"
-    echo "  export WORKER_IB_IP=\"169.254.x.x\"   # InfiniBand IP for NCCL"
-    echo ""
-    echo "Or start head only:"
-    echo "  $0 --head-only"
-    echo ""
-    echo "To find worker IPs, run on the worker node:"
-    echo "  hostname -I                          # Shows all IPs"
-    echo "  ibdev2netdev && ip addr show <ib_if> # Shows IB interface IP"
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    exit 1
-  fi
+if [ "${WORKER_COUNT}" -eq 0 ] && [ "${NUM_NODES}" -gt 1 ] && [ "${HEAD_ONLY}" != "true" ]; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo " Worker Configuration Required"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "NUM_NODES=${NUM_NODES} but no workers configured. Pick one:"
+  echo ""
+  echo "  A) Configure workers (space-separated for >1):"
+  echo "       export WORKER_HOST=\"192.168.x.x [192.168.x.y ...]\"    # Ethernet IPs (SSH)"
+  echo "       export WORKER_IB_IP=\"169.254.x.x [169.254.x.y ...]\"   # InfiniBand IPs (NCCL)"
+  echo ""
+  echo "  B) Single-Spark mode: re-run with NUM_NODES=1 TENSOR_PARALLEL=1"
+  echo ""
+  echo "  C) Head-only test: $0 --head-only (will hang waiting for ${NUM_NODES} workers)"
+  echo ""
+  echo "To find worker IPs, run on the worker node:"
+  echo "  hostname -I                          # Shows all IPs"
+  echo "  ibdev2netdev && ip addr show <ib_if> # Shows IB interface IP"
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  exit 1
+fi
 
-  # If WORKER_HOST not set, fall back to WORKER_IB_IP for SSH (backwards compat)
-  if [ -z "${WORKER_HOST}" ]; then
-    log "Warning: WORKER_HOST not set, using WORKER_IB_IP (${WORKER_IB_IP}) for SSH"
-    WORKER_HOST="${WORKER_IB_IP}"
+# Implicit head-only when no workers are configured (and NUM_NODES is sane).
+if [ "${WORKER_COUNT}" -eq 0 ]; then
+  HEAD_ONLY=true
+fi
+
+# Reconcile NUM_NODES with what WORKER_HOST actually provides when both are set.
+if [ "${HEAD_ONLY}" != "true" ] && [ "${WORKER_COUNT}" -gt 0 ]; then
+  EXPECTED_WORKERS=$((NUM_NODES - 1))
+  if [ "${WORKER_COUNT}" -ne "${EXPECTED_WORKERS}" ]; then
+    log "Note: NUM_NODES=${NUM_NODES} but ${WORKER_COUNT} worker(s) configured; using $((WORKER_COUNT + 1))."
+    NUM_NODES=$((WORKER_COUNT + 1))
   fi
 fi
 
-# Convert WORKER_IB_IP to array (supports multiple workers: "ip1 ip2 ip3")
-read -ra WORKER_IB_IP_ARRAY <<< "${WORKER_IB_IP}"
-read -ra WORKER_HOST_ARRAY <<< "${WORKER_HOST}"
-ACTUAL_NUM_WORKERS=${#WORKER_IB_IP_ARRAY[@]}
-
-if [ "${HEAD_ONLY}" != "true" ] && [ "${NUM_NODES}" -gt 1 ]; then
-  EXPECTED_WORKERS=$((NUM_NODES - 1))
-  if [ "${ACTUAL_NUM_WORKERS}" -ne "${EXPECTED_WORKERS}" ]; then
-    log "Warning: NUM_NODES=${NUM_NODES} but only ${ACTUAL_NUM_WORKERS} worker IP(s) provided"
-    log "Adjusting NUM_NODES to $((ACTUAL_NUM_WORKERS + 1))"
-    NUM_NODES=$((ACTUAL_NUM_WORKERS + 1))
-  fi
+# Pre-flight SSH connectivity check (one round trip per worker beats a partial
+# launch where worker N hangs SSH and we have to chase it down).
+if [ "${HEAD_ONLY}" != "true" ] && [ "${WORKER_COUNT}" -gt 0 ]; then
+  for ip in "${WORKER_HOST_ARRAY[@]}"; do
+    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+        "${WORKER_USER}@${ip}" "echo ok" >/dev/null 2>&1; then
+      error "Cannot SSH to ${WORKER_USER}@${ip}. Check SSH keys and connectivity (try: ssh-copy-id ${WORKER_USER}@${ip})."
+    fi
+  done
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -231,18 +277,23 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 log "Configuration:"
 log "  Model:             ${MODEL}"
-log "  Tensor Parallel:   ${TENSOR_PARALLEL} (per node)"
+log "  Tensor Parallel:   ${TENSOR_PARALLEL} (across all nodes)"
 log "  Pipeline Parallel: ${PIPELINE_PARALLEL} (across nodes)"
-log "  Nodes:             ${NUM_NODES}"
+log "  Nodes:             ${NUM_NODES} (1 head + ${WORKER_COUNT} worker(s))"
 log "  Memory Fraction:   ${MEM_FRACTION}"
 log ""
 log "Network:"
 log "  Head IP:         ${HEAD_IP}"
 log "  API Port:        ${SGLANG_PORT}"
 log "  Dist Init Port:  ${DIST_INIT_PORT}"
-if [ "${HEAD_ONLY}" != "true" ] && [ "${ACTUAL_NUM_WORKERS}" -gt 0 ]; then
-  log "  Worker Host:     ${WORKER_HOST} (SSH)"
-  log "  Worker IB IP:    ${WORKER_IB_IP} (NCCL)"
+if [ "${HEAD_ONLY}" != "true" ] && [ "${WORKER_COUNT}" -gt 0 ]; then
+  for i in "${!WORKER_HOST_ARRAY[@]}"; do
+    if [ "${WORKER_IB_IP_ARRAY[i]}" != "${WORKER_HOST_ARRAY[i]}" ]; then
+      log "  Worker $((i+1)):        ${WORKER_HOST_ARRAY[i]} (SSH) / ${WORKER_IB_IP_ARRAY[i]} (NCCL)"
+    else
+      log "  Worker $((i+1)):        ${WORKER_HOST_ARRAY[i]}"
+    fi
+  done
 fi
 log ""
 
@@ -292,20 +343,14 @@ fi
 # Step 4: Start workers via SSH (before head, so they're ready to connect)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-if [ "${HEAD_ONLY}" != "true" ] && [ "${ACTUAL_NUM_WORKERS}" -gt 0 ]; then
-  log "Step 4: Starting workers via SSH"
+if [ "${HEAD_ONLY}" != "true" ] && [ "${WORKER_COUNT}" -gt 0 ]; then
+  log "Step 4: Starting ${WORKER_COUNT} worker(s) via SSH"
 
-  NODE_RANK=1
-  for i in "${!WORKER_IB_IP_ARRAY[@]}"; do
+  for i in "${!WORKER_HOST_ARRAY[@]}"; do
+    SSH_HOST="${WORKER_HOST_ARRAY[$i]}"
     WORKER_IB="${WORKER_IB_IP_ARRAY[$i]}"
-    # Use WORKER_HOST for SSH if available, otherwise fall back to IB IP
-    SSH_HOST="${WORKER_HOST_ARRAY[$i]:-${WORKER_IB}}"
+    NODE_RANK=$((i + 1))
     log "  Starting worker at ${SSH_HOST} (IB: ${WORKER_IB}, node-rank ${NODE_RANK})..."
-
-    # Test SSH connectivity
-    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${WORKER_USER}@${SSH_HOST}" "echo ok" >/dev/null 2>&1; then
-      error "Cannot SSH to ${WORKER_USER}@${SSH_HOST}. Check SSH keys and connectivity."
-    fi
 
     # Start worker in background via SSH
     ssh "${WORKER_USER}@${SSH_HOST}" bash -s << WORKER_EOF &
@@ -400,15 +445,13 @@ docker run -d \
 
 echo "Worker \${WORKER_NAME} started on \$(hostname)"
 WORKER_EOF
-
-    NODE_RANK=$((NODE_RANK + 1))
   done
 
   # Wait briefly for workers to start
   log "  Waiting for workers to initialize..."
   sleep 5
 else
-  log "Step 4: Skipping workers (head-only mode or single node)"
+  log "Step 4: Skipping workers (head-only mode or single Spark)"
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -496,11 +539,12 @@ log "  Head container started"
 log "Step 6: Waiting for cluster to be ready"
 
 if [ "${NUM_NODES}" -gt 1 ]; then
-  MAX_WAIT=600
-  log "  Multi-node cluster - waiting up to 10 minutes..."
+  # 10 min base + 2 min per worker; large clusters take longer to bootstrap.
+  MAX_WAIT=$((600 + 120 * WORKER_COUNT))
+  log "  Multi-Spark cluster (${NUM_NODES} nodes) - waiting up to $((MAX_WAIT / 60)) minutes..."
 else
   MAX_WAIT=300
-  log "  Single-node - waiting up to 5 minutes..."
+  log "  Single Spark - waiting up to 5 minutes..."
 fi
 
 READY=false
@@ -563,7 +607,7 @@ fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Cluster Info:"
-echo "  Nodes:         ${NUM_NODES} (1 head + $((NUM_NODES - 1)) workers)"
+echo "  Nodes:         ${NUM_NODES} (1 head + ${WORKER_COUNT} worker(s))"
 echo "  Model:         ${MODEL}"
 echo "  TP:            ${TENSOR_PARALLEL}"
 echo ""
@@ -581,10 +625,11 @@ echo "  ./benchmark_current.sh --quick"
 echo ""
 echo "Logs:"
 echo "  docker logs -f ${HEAD_CONTAINER_NAME}"
-for i in "${!WORKER_IB_IP_ARRAY[@]}"; do
-  SSH_HOST="${WORKER_HOST_ARRAY[$i]:-${WORKER_IB_IP_ARRAY[$i]}}"
-  echo "  ssh ${WORKER_USER}@${SSH_HOST} docker logs -f sglang-worker-*"
-done
+if [ "${HEAD_ONLY}" != "true" ]; then
+  for i in "${!WORKER_HOST_ARRAY[@]}"; do
+    echo "  ssh ${WORKER_USER}@${WORKER_HOST_ARRAY[i]} 'docker logs -f \$(docker ps --format \"{{.Names}}\" | grep ^sglang-worker-)'"
+  done
+fi
 echo ""
 echo "Stop Cluster:"
 echo "  ./stop_cluster.sh"

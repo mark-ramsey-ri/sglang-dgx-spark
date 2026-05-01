@@ -1,14 +1,15 @@
 # SGLang on DGX Spark Cluster
 
-Deploy [SGLang](https://github.com/sgl-project/sglang) on a dual-node NVIDIA DGX Spark cluster with InfiniBand RDMA for serving large language models like GPT-OSS 120B.
+Deploy [SGLang](https://github.com/sgl-project/sglang) on 1-to-N NVIDIA DGX Spark systems (single Spark, 2 Sparks via QSFP cable, or 3+ Sparks via switch) with InfiniBand RDMA for serving large language models like GPT-OSS 120B.
 
 > **DISCLAIMER**: This project is NOT affiliated with, endorsed by, or officially supported by NVIDIA, SGLang, LMSYS, or any other organization. This is a community-driven effort to run SGLang on DGX Spark hardware. Use at your own risk. The software is provided "AS IS", without warranty of any kind.
 
 ## Features
 
+- **1-to-N Spark support** - Single Spark, 2 via cable, or 3+ via switched fabric (set `WORKER_HOST="ip1 ip2 ip3"`)
 - **Single-command deployment** - Start entire cluster from head node via SSH
 - **Auto-detection** of InfiniBand IPs, network interfaces, and HCA devices
-- **Generic scripts** that work on any DGX Spark pair
+- **Latest SGLang container** (`v0.5.10.post1-cu130`, multi-arch arm64)
 - **GPT-OSS 120B** support with reasoning/tool parsers
 - **Blackwell (sm100) GPU support** with multi-node workarounds
 - **InfiniBand RDMA** for high-speed inter-node communication
@@ -37,11 +38,14 @@ Deploy [SGLang](https://github.com/sgl-project/sglang) on a dual-node NVIDIA DGX
 
 ## Hardware Requirements
 
-- **Nodes:** 2x DGX Spark systems
+- **Nodes:** 1 to N DGX Spark systems
+  - 1 Spark: standalone, no IB needed (TP=1)
+  - 2 Sparks: direct QSFP cable between them
+  - 3+ Sparks: QSFP through a switch (NVIDIA's "stacked Sparks" topology)
 - **GPUs:** 1x NVIDIA GB10 (Grace Blackwell, sm100) per node, ~120GB VRAM each
-- **Network:** 200Gb/s InfiniBand RoCE between nodes
+- **Network:** 200Gb/s InfiniBand RoCE between nodes (multi-Spark only)
 - **Storage:** Shared model cache at `/raid/hf-cache` (or configure in `config.env`)
-- **SSH:** Passwordless SSH from head to worker node(s)
+- **SSH:** Passwordless SSH from head to all worker nodes
 
 ## Prerequisites
 

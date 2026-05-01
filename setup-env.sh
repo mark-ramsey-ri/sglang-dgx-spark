@@ -7,21 +7,49 @@
 # Network configuration (IPs, interfaces, HCAs) is auto-detected by scripts.
 #
 # Required configuration:
-#   - WORKER_HOST: Worker Ethernet IP (for SSH access)
-#   - WORKER_IB_IP: Worker InfiniBand IP (for NCCL communication)
+#   - WORKER_HOST: Worker Ethernet IP(s) for SSH access (space-separated for >1)
+#   - WORKER_IB_IP: Worker InfiniBand IP(s) for NCCL (1:1 with WORKER_HOST)
 #   - HF_TOKEN: HuggingFace token (for gated models like Llama)
 #
 # Usage:
 #   source ./setup-env.sh           # Interactive mode (recommended)
 #   source ./setup-env.sh --head    # Head node mode
+#   ./setup-env.sh --discover       # Run NVIDIA's mDNS Spark discovery and
+#                                   # bidir SSH key push (no shell vars set)
 #
 # NOTE: This script must be SOURCED (not executed) to set environment variables
+#       — except for --discover which is a one-shot.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# --discover is a one-shot wrapper that runs without sourcing. It downloads
+# and runs NVIDIA's discover-sparks helper (mDNS scan + bidir SSH key push).
+if [[ "${1:-}" == "--discover" ]]; then
+    NVIDIA_DISCOVER_URL="https://raw.githubusercontent.com/NVIDIA/dgx-spark-playbooks/refs/heads/main/nvidia/connect-two-sparks/assets/discover-sparks"
+    TMP_SCRIPT="$(mktemp -t discover-sparks.XXXXXX.sh)"
+    trap 'rm -f "${TMP_SCRIPT}"' EXIT
+    echo ""
+    echo "Fetching NVIDIA's discover-sparks helper..."
+    echo "  Source: ${NVIDIA_DISCOVER_URL}"
+    if ! curl -fsSL "${NVIDIA_DISCOVER_URL}" -o "${TMP_SCRIPT}"; then
+        echo "ERROR: Could not download ${NVIDIA_DISCOVER_URL}"
+        echo "       Check your network, or run the steps manually (see README)."
+        exit 1
+    fi
+    chmod +x "${TMP_SCRIPT}"
+    echo "Running discover-sparks (will mDNS-scan and prompt for per-Spark passwords)..."
+    echo ""
+    "${TMP_SCRIPT}" || true
+    echo ""
+    echo "Done. Re-run interactively to capture WORKER_HOST / WORKER_IB_IP:"
+    echo "    source ./setup-env.sh"
+    exit 0
+fi
 
 # Check if script is being sourced
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This script must be sourced, not executed"
     echo "Usage: source ./setup-env.sh"
+    echo "       (or: ./setup-env.sh --discover)"
     exit 1
 fi
 
@@ -140,18 +168,22 @@ echo ""
 echo -e "${GREEN}--- Required Settings ---${NC}"
 echo ""
 
-# Worker host for SSH
-echo "Worker Node Ethernet IP (for SSH access):"
-echo "  Standard ethernet/network IP used to SSH to the worker"
-echo "  Example: 192.168.7.111"
-prompt_input "WORKER_HOST" "Enter worker Ethernet IP" ""
+# Worker host(s) for SSH — space-separated for >1 worker.
+echo "Worker Node Ethernet IP(s) (for SSH access):"
+echo "  Space-separated for multiple workers (1-to-N Spark support)."
+echo "  First-time setup tip: ./setup-env.sh --discover (NVIDIA mDNS scan)"
+echo "  1 worker:  192.168.7.111"
+echo "  3 workers: 192.168.7.111 192.168.7.112 192.168.7.113"
+prompt_input "WORKER_HOST" "Enter worker Ethernet IP(s)" ""
 echo ""
 
-# Worker InfiniBand IP for NCCL
-echo "Worker Node InfiniBand IP (for NCCL communication):"
-echo "  Find it on worker: ibdev2netdev && ip addr show <interface>"
-echo "  Example: 169.254.216.8"
-prompt_input "WORKER_IB_IP" "Enter worker InfiniBand IP" ""
+# Worker InfiniBand IP(s) for NCCL — 1:1 positional with WORKER_HOST.
+echo "Worker Node InfiniBand IP(s) (for NCCL communication):"
+echo "  Space-separated, must be 1:1 positional with WORKER_HOST above."
+echo "  Find on each worker: ibdev2netdev && ip addr show <interface>"
+echo "  1 worker:  169.254.216.8"
+echo "  3 workers: 169.254.216.8 169.254.216.9 169.254.216.10"
+prompt_input "WORKER_IB_IP" "Enter worker InfiniBand IP(s)" ""
 echo ""
 
 # Worker SSH username
@@ -179,9 +211,14 @@ echo "  Alternatives: openai/gpt-oss-20b, nvidia/Llama-3.3-70B-Instruct-FP4"
 prompt_input "MODEL" "Model name" "openai/gpt-oss-120b"
 echo ""
 
-prompt_input "TENSOR_PARALLEL" "Tensor parallel size (total GPUs)" "2"
-prompt_input "NUM_NODES" "Number of nodes" "2"
+# Default TP/NUM_NODES from worker count; user can still override.
+read -ra _WORKER_HOST_ARRAY <<< "${WORKER_HOST:-}"
+_DEFAULT_NODES=$(( ${#_WORKER_HOST_ARRAY[@]} + 1 ))
+unset _WORKER_HOST_ARRAY
+prompt_input "TENSOR_PARALLEL" "Tensor parallel size (total GPUs across all Sparks)" "${_DEFAULT_NODES}"
+prompt_input "NUM_NODES" "Number of nodes (1 head + N workers)" "${_DEFAULT_NODES}"
 prompt_input "MEM_FRACTION" "Memory fraction for KV cache (0.0-1.0)" "0.90"
+unset _DEFAULT_NODES
 echo ""
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -191,7 +228,7 @@ echo ""
 echo -e "${BLUE}--- Advanced Settings (press Enter for defaults) ---${NC}"
 echo ""
 
-prompt_input "SGLANG_IMAGE" "Docker image" "lmsysorg/sglang:spark"
+prompt_input "SGLANG_IMAGE" "Docker image" "lmsysorg/sglang:v0.5.10.post1-cu130"
 prompt_input "SGLANG_PORT" "API port" "30000"
 prompt_input "DISABLE_CUDA_GRAPH" "Disable CUDA graph (true/false)" "false"
 echo ""
